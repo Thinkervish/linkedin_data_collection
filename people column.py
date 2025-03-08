@@ -5,22 +5,23 @@ import pandas as pd
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from fake_useragent import UserAgent
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import json
 
-# Generate a random user agent
+
 ua = UserAgent()
 chrome_options = uc.ChromeOptions()
-chrome_options.headless = False  # Set to True to run in the background
+chrome_options.headless = False  
 chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-chrome_options.add_argument(f"user-agent={ua.random}")  # Adding user agent
-
-# Load credentials from environment variables
+chrome_options.add_argument(f"user-agent={ua.random}") 
 linkedin_username = os.getenv("LINKEDIN_USER")
 linkedin_password = os.getenv("LINKEDIN_PASS")
+
+if not linkedin_username or not linkedin_password:
+    raise Exception("LinkedIn credentials not found. Set environment variables first.")
 
 
 def slow_down():
@@ -28,22 +29,18 @@ def slow_down():
 
 
 def login(driver):
-    """Logs into LinkedIn using provided credentials"""
     driver.get("https://www.linkedin.com/login")
     time.sleep(random.uniform(3, 5))
+
     try:
         email_input = driver.find_element(By.ID, "username")
         password_input = driver.find_element(By.ID, "password")
 
-        if not linkedin_username or not linkedin_password:
-            print("❌ Error: LinkedIn username or password is not set!")
-            driver.quit()
-            exit()
-
         email_input.send_keys(linkedin_username)
         password_input.send_keys(linkedin_password)
         password_input.send_keys(Keys.RETURN)
-        time.sleep(random.uniform(5, 7))
+
+        time.sleep(random.uniform(5, 7))  
     except NoSuchElementException:
         print("❌ Error: Login elements not found!")
         driver.quit()
@@ -51,79 +48,108 @@ def login(driver):
 
 
 def get_company_url(driver, company_name):
-    """Gets the LinkedIn company page URL by searching"""
+    
     search_url = f"https://www.linkedin.com/search/results/companies/?keywords={company_name.replace(' ', '%20')}"
     try:
         driver.get(search_url)
         time.sleep(random.uniform(3, 6))
+
         first_result = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, "//a[contains(@href, '/company/')]"))
         )
         return first_result.get_attribute("href")
-    except:
+    except TimeoutException:
+        print(f"⚠ No LinkedIn page found for {company_name}. Skipping...")
+        return None  
+    except Exception as e:
+        print(f"❌ Error fetching LinkedIn page for {company_name}: {e}")
         return None
 
 
-def scrape_people_section(driver, company_url):
-    """Scrapes the 'People' section of a LinkedIn company page"""
-    people_url = company_url + "people/"
-    driver.get(people_url)
-    time.sleep(random.uniform(3, 6))
+def scrape_about_section(driver, company_url):
+    about_url = company_url + "about/"
 
-    # Expand "Show More" buttons
     try:
-        show_more_buttons = driver.find_elements(By.XPATH, "//button[contains(text(), 'Show more')]")
-        for button in show_more_buttons:
-            driver.execute_script("arguments[0].click();", button)
-            time.sleep(2)
-    except:
-        pass
+        driver.get(about_url)
+        time.sleep(random.uniform(3, 6))  
 
-    def extract_data(xpath):
-        """Extracts job role and location data"""
+        
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 300);")
+            time.sleep(random.uniform(2, 4))
+
+    except TimeoutException:
+        print(f"⏳ Timeout while loading {about_url}. Skipping...")
+        return {}  
+    except Exception as e:
+        print(f"❌ Error scraping {about_url}: {e}")
+        return {}
+
+    def safe_find(xpath, attribute=None):
+        
         try:
-            elements = driver.find_elements(By.XPATH, xpath)
-            return {elem.text.split('\n')[0]: int(elem.text.split('\n')[1].replace(",", "")) for elem in elements}
+            element = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xpath)))
+            return element.get_attribute(attribute) if attribute else element.text.strip()
         except:
-            return {}
+            return "N/A"
 
-    location_data = extract_data("//h3[contains(text(),'Where they live')]/following-sibling::ul//li")
-    job_role_data = extract_data("//h3[contains(text(),'What they do')]/following-sibling::ul//li")
+    
+    overview = safe_find("//h2[text()='Overview']/following-sibling::p")
+    website = safe_find("//dt[h3[text()='Website']]/following-sibling::dd//a", "href")
+    industry = safe_find("//dt[h3[text()='Industry']]/following-sibling::dd[contains(@class, 'text-body-medium')]")
+    company_size = safe_find("//h3[text()='Company size']/following::dd[1]")
+    headquarters = safe_find("//h3[text()='Headquarters']/following::dd[1]")
+    founded = safe_find("//h3[text()='Founded']/following::dd[1]")
+    specialties = safe_find("//h3[text()='Specialties']/following::dd[1]")
 
-    return {"Where They Live": location_data, "What They Do": job_role_data}
+    
+    if "linkedin.com" in website:
+        website = "N/A"
+
+    return {
+        "Overview": overview,
+        "Website": website,
+        "Industry": industry,
+        "Company Size": company_size,
+        "Headquarters": headquarters,
+        "Founded": founded,
+        "Specialties": specialties
+    }
 
 
 def process_companies(driver, data, output_file):
-    """Processes a list of companies from a CSV file and extracts LinkedIn data"""
-    df = pd.read_csv(data)
-    people_data = []
+    
+    df = pd.read_csv(data)  
+    results = []
 
     for index, row in df.iterrows():
-        company_name = row['Company_Name']
+        company_name = row['Company_Name']  
         print(f"🔍 Searching for {company_name} on LinkedIn...")
+
         company_url = get_company_url(driver, company_name)
 
-        if company_url:
-            print(f"✅ Found LinkedIn page for {company_name}")
-            people_info = scrape_people_section(driver, company_url)
-            if people_info:
-                for location, count in people_info.get("Where They Live", {}).items():
-                    people_data.append([company_name, "Where They Live", location, count])
-                for role, count in people_info.get("What They Do", {}).items():
-                    people_data.append([company_name, "What They Do", role, count])
-        else:
-            print(f"❌ No LinkedIn page found for {company_name}")
+        if not company_url:
+            print(f"⚠ Skipping {company_name} as it does not exist on LinkedIn.")
+            continue  
 
-    # Convert to DataFrame and Save as CSV
-    df_people = pd.DataFrame(people_data, columns=["Company", "Category", "Attribute", "Count"])
-    df_people.to_csv(output_file, index=False)
-    print(f"✅ Data saved successfully to {output_file}")
+        about_data = scrape_about_section(driver, company_url)
+
+        if about_data:
+            about_data['Company Name'] = company_name
+            about_data['LinkedIn URL'] = company_url
+            results.append(about_data)
+
+    output_df = pd.DataFrame(results)
+    output_df.to_csv(output_file, index=False)
+    print(f"✅ Data saved to {output_file}")
 
 
-# Start undetected Chrome and run the scraping process
+
 with uc.Chrome(options=chrome_options) as driver:
-    driver.set_page_load_timeout(180)
-    login(driver)
-    input("Log in to LinkedIn manually, then press Enter to continue...")
-    process_companies(driver, "data.csv", "output.csv")
+    driver.set_page_load_timeout(180)  
+
+    login(driver)  
+    input("Log in to LinkedIn manually, then press Enter to continue...")  
+    process_companies(driver, "data.csv", "output.csv")  
+
     print("✅ Scraping completed successfully!")
